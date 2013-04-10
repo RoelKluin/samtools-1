@@ -201,14 +201,48 @@ const bam_pileup1_t *bam_plp_next(bam_plp_t iter, int *_tid, int *_pos, int *_n_
 		// write iter->plp at iter->pos
 		iter->dummy->next = iter->head;
 		for (p = iter->head, q = iter->dummy; p->next; q = p, p = p->next) {
-			if (p->b.core.tid < iter->tid || (p->b.core.tid == iter->tid && p->end <= iter->pos)) { // then remove
+			bam1_t* b1 = &p->b;
+			if (b1->core.tid < iter->tid || (b1->core.tid == iter->tid && p->end <= iter->pos)) { // then remove
 				q->next = p->next; mp_free(iter->mp, p); p = q;
-			} else if (p->b.core.tid == iter->tid && p->beg <= iter->pos) { // here: p->end > pos; then add to pileup
+			} else if (b1->core.tid == iter->tid && p->beg <= iter->pos) { // here: p->end > pos; then add to pileup
 				if (n_plp == iter->max_plp) { // then double the capacity
 					iter->max_plp = iter->max_plp? iter->max_plp<<1 : 256;
 					iter->plp = (bam_pileup1_t*)realloc(iter->plp, sizeof(bam_pileup1_t) * iter->max_plp);
 				}
-				iter->plp[n_plp].b = &p->b;
+				// only consider one of the reads if paired and the mate also covers this position
+				if ((b1->core.flag & 1) && abs(b1->core.isize) <= b1->core.l_qseq * 2) {
+					unsigned i;
+					for (i = 0; i < n_plp; ++i) {
+						bam1_t* b2 = iter->plp[i].b;
+						if (((b1->core.isize ^ b2->core.isize) > 0) || //same sign
+								abs(b2->core.isize) >= b2->core.l_qseq * 2)
+							continue;
+						if (strcmp(bam1_qname(b1), bam1_qname(b2)) == 0) {
+							/* check whether variants are the same */
+							unsigned p1 = iter->pos - b1->core.pos;
+							unsigned p2 = iter->pos - b2->core.pos;
+							if ((p1 > bam_cigar2qlen(&b1->core, bam1_cigar(b1))) ||
+									(p2 > bam_cigar2qlen(&b2->core, bam1_cigar(b2))) ||
+								p1 < 0 || p2 < 0) {
+								/* FIXME: why does this occur? appears only in case of deletions
+								fprintf(stderr, "%s\nb1:%d, %d, %d\n", bam1_qname(b1),
+									iter->pos, b1->core.pos, b1->core.l_qseq - p1);
+								fprintf(stderr, "b2:%d, %d, %d\n", iter->pos, b2->core.pos,
+									b2->core.l_qseq - p2);*/
+								break;
+							}
+							//keep the one with the highest base quality
+							if (bam1_qual(b1)[p1] < bam1_qual(b2)[p2]) {
+								iter->plp[i].b = b1;
+								resolve_cigar2(iter->plp + i, iter->pos, &p->s);
+							}
+							break;
+						}
+					}
+					if (i != n_plp)
+						continue;
+				}
+				iter->plp[n_plp].b = b1;
 				if (resolve_cigar2(iter->plp + n_plp, iter->pos, &p->s)) ++n_plp; // actually always true...
 			}
 		}
